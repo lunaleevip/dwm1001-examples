@@ -11,6 +11,8 @@
  *
  * @author Decawave
  */
+#include "uwb_frames.h"
+#include "error.h"
 
 /* Declaration of static functions. */
 static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts);
