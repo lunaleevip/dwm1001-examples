@@ -33,7 +33,7 @@
 
 #define POLL_TX_TO_RESP_RX_DLY_UUS 1000 
 
-uint16_t g_pan_id = 0xABCD;    //类似小组ID
+uint16_t g_pan_id = 0xDECA;    //类似小组ID
 uint8_t  g_rNum = 0;
 uint8_t  g_role = ANC_MODE;
 uint8_t  g_resp_count = 0;
@@ -112,6 +112,29 @@ static uint64 get_rx_timestamp_u64(void)
   }
   return ts;
 }
+
+// convert microseconds to device time
+uint64 convertmicrosectodevicetimeu (double microsecu)
+{
+    uint64 dt;
+    long double dtime;
+
+    dtime = (microsecu / (double) DWT_TIME_UNITS) / 1e6 ;
+
+    dt =  (uint64) (dtime) ;
+
+    return dt;
+}
+
+double convertdevicetimetosec(int32 dt)
+{
+    double f = 0;
+
+    f =  dt * DWT_TIME_UNITS ;  // seconds #define TIME_UNITS          (1.0/499.2e6/128.0) = 15.65e-12
+
+    return f ;
+}
+
 
 char *Bytetohex(char *in_buf, int16_t len)
 {
@@ -258,6 +281,7 @@ void Tag_poll(void)
 
 int poll_rx_delay = 19;
 #pragma GCC optimize ("O3")
+#define DELAY_TIME (1200)// 1200, 1800,2800,3800
 void Resp_send(poll_xexun_msg_t *poll_msg)
 {
     uint64_t poll_rx_ts = 0, resp_tx_ts = 0, resp_tx_time = 0;
@@ -283,24 +307,24 @@ void Resp_send(poll_xexun_msg_t *poll_msg)
     resp_msg->resp.rNum = poll_msg->poll.rNum;
 
     tx_msg.psduLen = sizeof(resp_xexun_msg_t);
-    tx_msg.Flag = DWT_START_TX_DELAYED;
-    tx_msg.delayedRxTime_sy = 300;
+    tx_msg.Flag = DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED;
+    tx_msg.delayedRxTime_sy = 100;
     tx_msg.delayedRxTimeout_sy = 0;
 
     /* Retrieve poll reception timestamp. */
     poll_rx_ts = get_rx_timestamp_u64();
 
     /* Compute final message transmission time. See NOTE 7 below. */
-    resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
+      resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
+//    resp_tx_time = (poll_rx_ts + convertmicrosectodevicetimeu(DELAY_TIME)) >> 8;
     //dwt_setdelayedtrxtime(resp_tx_time);
     tx_msg.delayedTxTimeH_sy = resp_tx_time;
 
     /* Response TX timestamp is the transmission time we programmed plus the antenna delay. */
     resp_tx_ts = (((uint64)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
 
-
     slotCorr_us = resp_tx_ts - poll_rx_ts;
-    memcpy(&resp_msg->resp.slotCorr_us[0], &slotCorr_us, 4);
+    resp_msg->resp.slotCorr_us = slotCorr_us;
     
     ret = tx_start(&tx_msg);
 
@@ -308,6 +332,7 @@ void Resp_send(poll_xexun_msg_t *poll_msg)
     {
         poll_rx_delay++;
     }
+    printf("%s|%d, seq %3d, Delay %d\n", __FUNCTION__, __LINE__, poll_msg->poll.rNum, DELAY_TIME);    
 }
 
 #pragma GCC optimize ("O3")
@@ -332,7 +357,7 @@ void Resp_Recved(resp_xexun_msg_t *resp_msg)
     /* Compute time of flight and distance, using clock offset ratio to correct for differing local and remote clock rates */
     rtd_init = resp_rx_ts - poll_tx_ts;
     
-    resp_msg_get_ts(&resp_msg->resp.slotCorr_us[0], &rtd_resp);
+    rtd_resp = resp_msg->resp.slotCorr_us;
 
     tof = ((rtd_init - rtd_resp * (1.0f - clockOffsetRatio)) / 2.0f) * DWT_TIME_UNITS; // Specifying 1.0f and 2.0f are floats to clear warning 
     distance = tof * SPEED_OF_LIGHT;
@@ -393,7 +418,7 @@ void init_func(void)
             dwt_setdblrxbuffmode (0);    /**< dblBuf is not used in TWR */
             dwt_setrxaftertxdelay(0);    /**< no any delays set by default : part of config of receiver on Tx sending */
             dwt_setrxtimeout     (0);    /**< no any delays set by default : part of config of receiver on Tx sending */
-            //dwt_enableframefilter(p->frameFilter);
+            dwt_enableframefilter(DWT_FF_ACK_EN|DWT_FF_DATA_EN);
 
             dwt_setpanid(g_pan_id);
 
@@ -490,7 +515,7 @@ void rx_ok_cb(const dwt_cb_data_t *cb_data)
                     }
                     else
                     {
-                        printf("g_rNum: %d, rNum: %d\n", g_rNum, resp_msg->resp.rNum);
+                        printf("g_rNum: %3d, rNum: %3d\n", g_rNum, resp_msg->resp.rNum);
                     }
                 }
                 break;
@@ -499,8 +524,13 @@ void rx_ok_cb(const dwt_cb_data_t *cb_data)
             case Twr_Fcode_Tag_Final_Xexun:// Initiator (Tag) final message back to Responder Xexun
                 {
                     final_msg_xexun_t *final_msg = &rx_msg.msg.finalXexunMsg;
-                    printf("TagID: %08X, rNum: %3d, Anc %08X, Dis: %f\n", final_msg->mac.sourceAddr[0] | final_msg->mac.sourceAddr[1] << 8 | final_msg->final.id_ext[0] << 16 | final_msg->final.id_ext[1] << 24,
-                        final_msg->final.rNum, final_msg->final.anchor_id0, final_msg->final.distance0);
+                    printf("TagID: %08X, rNum: %3d, Anc0 %08X, Dis: %6.3f, Anc1 %08X, Dis: %6.3f, Anc2 %08X, Dis: %6.3f, Anc3 %08X, Dis: %6.3f\n", final_msg->mac.sourceAddr[0] | final_msg->mac.sourceAddr[1] << 8 | final_msg->final.id_ext[0] << 16 | final_msg->final.id_ext[1] << 24,
+                        final_msg->final.rNum, 
+                        final_msg->final.anchor_id0, final_msg->final.distance0,
+                        final_msg->final.anchor_id1, final_msg->final.distance1,
+                        final_msg->final.anchor_id2, final_msg->final.distance2,
+                        final_msg->final.anchor_id3, final_msg->final.distance3
+                        );
 
                 }
                 break;

@@ -33,7 +33,7 @@
 
 #define POLL_TX_TO_RESP_RX_DLY_UUS 1000 
 
-uint16_t g_pan_id = 0xABCD;    //类似小组ID
+uint16_t g_pan_id = 0xDECA;    //类似小组ID
 uint8_t  g_rNum = 0;
 uint8_t  g_role = TAG_MODE;
 uint8_t  g_resp_count = 0;
@@ -85,6 +85,8 @@ static uint32 status_reg = 0;
 /* Hold copies of computed time of flight and distance here for reference so that it can be examined at a debug breakpoint. */
 static double tof;
 static double distance;
+static uint32_t g_poll_tx_ts = 0;
+final_msg_xexun_t g_final_msg = {0};
 
 /* Declaration of static functions. */
 static void resp_msg_get_ts(uint8 *ts_field, uint32 *ts);
@@ -111,6 +113,28 @@ static uint64 get_rx_timestamp_u64(void)
     ts |= ts_tab[i];
   }
   return ts;
+}
+
+// convert microseconds to device time
+uint64 convertmicrosectodevicetimeu (double microsecu)
+{
+    uint64 dt;
+    long double dtime;
+
+    dtime = (microsecu / (double) DWT_TIME_UNITS) / 1e6 ;
+
+    dt =  (uint64) (dtime) ;
+
+    return dt;
+}
+
+double convertdevicetimetosec(int32 dt)
+{
+    double f = 0;
+
+    f =  dt * DWT_TIME_UNITS ;  // seconds #define TIME_UNITS          (1.0/499.2e6/128.0) = 15.65e-12
+
+    return f ;
 }
 
 char *Bytetohex(char *in_buf, int16_t len)
@@ -227,6 +251,8 @@ tx_start(uwb_pckt_t * pTxPckt)
 void Tag_poll(void)
 {
     poll_xexun_msg_t *poll_msg = &tx_msg.msg.pollXexunMsg;
+    final_msg_xexun_t * final_msg = &g_final_msg;
+    g_resp_count = 0;
 
     //printf("%s|%d\n", __FUNCTION__, __LINE__);    
     poll_msg->mac.frameCtrl[0] = Head_Msg_STD;
@@ -249,8 +275,26 @@ void Tag_poll(void)
     tx_msg.Flag = DWT_START_TX_IMMEDIATE | DWT_RESPONSE_EXPECTED;
     tx_msg.delayedTxTimeH_sy = 0;
     tx_msg.delayedRxTime_sy = 100;
-    tx_msg.delayedRxTimeout_sy = 30000;
-    g_resp_count = 0;
+    tx_msg.delayedRxTimeout_sy = 30000*(4-g_resp_count);
+    
+    memset(final_msg, 0, sizeof(final_msg_xexun_t));
+
+    final_msg->mac.frameCtrl[0] = Head_Msg_STD;
+    final_msg->mac.frameCtrl[1] = Frame_Ctrl_SS;
+
+    final_msg->mac.panID[0] = g_pan_id & 0xff;
+    final_msg->mac.panID[1] = g_pan_id >> 8 & 0xff;
+    final_msg->mac.sourceAddr[0] = dwt_getpartid() & 0xff;
+    final_msg->mac.sourceAddr[1] = dwt_getpartid() >> 8 & 0xff;
+    
+    final_msg->mac.destAddr[0] = 0xff;
+    final_msg->mac.destAddr[1] = 0xff;
+
+    final_msg->final.rNum = poll_msg->poll.rNum;
+    final_msg->final.fCode = Twr_Fcode_Tag_Final_Xexun;
+    final_msg->final.id_ext[0] = dwt_getpartid() >> 16 & 0xff;
+    final_msg->final.id_ext[1] = dwt_getpartid() >> 24 & 0xff;
+
     printf("%s|%d, rNum: %3d\n", __FUNCTION__, __LINE__, poll_msg->poll.rNum);    
     tx_start(&tx_msg);
 }
@@ -282,7 +326,7 @@ void Resp_send(poll_xexun_msg_t *poll_msg)
     resp_msg->resp.rNum = poll_msg->poll.rNum;
 
     tx_msg.psduLen = sizeof(resp_xexun_msg_t);
-    tx_msg.Flag = DWT_START_TX_DELAYED;
+    tx_msg.Flag = DWT_START_TX_DELAYED | DWT_RESPONSE_EXPECTED;
     tx_msg.delayedRxTime_sy = 300;
     tx_msg.delayedRxTimeout_sy = 0;
 
@@ -299,8 +343,7 @@ void Resp_send(poll_xexun_msg_t *poll_msg)
 
 
     slotCorr_us = resp_tx_ts - poll_rx_ts;
-    memcpy(&resp_msg->resp.slotCorr_us[0], &slotCorr_us, 4);
-    
+    resp_msg->resp.slotCorr_us = slotCorr_us;
     ret = tx_start(&tx_msg);
 
     if(ret != _NO_ERR)
@@ -309,68 +352,73 @@ void Resp_send(poll_xexun_msg_t *poll_msg)
     }
 }
 
+void Final_send(void)
+{
+    final_msg_xexun_t * final_msg = &g_final_msg;
+    uint8_t resp_count = g_resp_count;
+    
+    final_msg->mac.seqNum = (++frame_seq_nb);
+
+    memcpy(&tx_msg.msg.finalXexunMsg, final_msg, sizeof(final_msg_xexun_t));
+    tx_msg.psduLen = sizeof(final_msg_xexun_t);
+    tx_msg.Flag = DWT_START_TX_IMMEDIATE;
+    tx_msg.delayedTxTimeH_sy = 0;//resp_tx_time;
+    g_resp_count = 0;
+    
+    tx_start(&tx_msg);
+    printf("%s|%d, rNum: %3d, nResp: %d\n", __FUNCTION__, __LINE__, final_msg->final.rNum, resp_count);    
+}
+
 #pragma GCC optimize ("O3")
 void Resp_Recved(resp_xexun_msg_t *resp_msg)
 {
-    uint32 poll_tx_ts, resp_rx_ts, poll_rx_ts, resp_tx_ts, resp_tx_time = 0;
+    uint32 resp_rx_ts, poll_rx_ts, resp_tx_ts, resp_tx_time = 0;
     int32 rtd_init, rtd_resp;
     float clockOffsetRatio;
     uint32_t anc_id = 0;
     int ret = 0;
-    final_msg_xexun_t * final_msg = &tx_msg.msg.finalXexunMsg;
+    final_msg_xexun_t * final_msg = &g_final_msg;
 
     //printf("%s|%d, poll_rx_delay %d\n", __FUNCTION__, __LINE__, poll_rx_delay);    
     anc_id = resp_msg->mac.sourceAddr[0] | resp_msg->mac.sourceAddr[1] << 8 | resp_msg->resp.id_ext[0] << 16 | resp_msg->resp.id_ext[1] << 24;
     /* Retrieve poll transmission and response reception timestamps. See NOTE 4 below. */
-    poll_tx_ts = dwt_readtxtimestamplo32();
+    //poll_tx_ts = dwt_readtxtimestamplo32();
+    
     resp_rx_ts = dwt_readrxtimestamplo32();
 
     /* Read carrier integrator value and calculate clock offset ratio. See NOTE 6 below. */
     clockOffsetRatio = dwt_readcarrierintegrator() * (FREQ_OFFSET_MULTIPLIER * HERTZ_TO_PPM_MULTIPLIER_CHAN_5 / 1.0e6) ;
 
     /* Compute time of flight and distance, using clock offset ratio to correct for differing local and remote clock rates */
-    rtd_init = resp_rx_ts - poll_tx_ts;
-    
-    resp_msg_get_ts(&resp_msg->resp.slotCorr_us[0], &rtd_resp);
+    rtd_init = resp_rx_ts - g_poll_tx_ts;
+
+    rtd_resp = resp_msg->resp.slotCorr_us;
 
     tof = ((rtd_init - rtd_resp * (1.0f - clockOffsetRatio)) / 2.0f) * DWT_TIME_UNITS; // Specifying 1.0f and 2.0f are floats to clear warning 
     distance = tof * SPEED_OF_LIGHT;
     //memset(&rx_msg, 0, sizeof(rx_msg));
 
-    final_msg->mac.frameCtrl[0] = Head_Msg_STD;
-    final_msg->mac.frameCtrl[1] = Frame_Ctrl_SS;
-    final_msg->mac.seqNum = (++frame_seq_nb);
-    final_msg->mac.panID[0] = g_pan_id & 0xff;
-    final_msg->mac.panID[1] = g_pan_id >> 8 & 0xff;
-    final_msg->mac.sourceAddr[0] = dwt_getpartid() & 0xff;
-    final_msg->mac.sourceAddr[1] = dwt_getpartid() >> 8 & 0xff;
-    
-    final_msg->mac.destAddr[0] = 0xff;
-    final_msg->mac.destAddr[1] = 0xff;
-    
-    final_msg->final.fCode = Twr_Fcode_Tag_Final_Xexun;
-    final_msg->final.id_ext[0] = dwt_getpartid() >> 16 & 0xff;
-    final_msg->final.id_ext[1] = dwt_getpartid() >> 24 & 0xff;
-    final_msg->final.rNum = resp_msg->resp.rNum;
-    final_msg->final.anchor_id0 = anc_id;//(uint32_t)(resp_msg->mac.sourceAddr[0] | resp_msg->mac.sourceAddr[1] << 8 \
-        //| resp_msg->resp.id_ext[0] << 16 | resp_msg->resp.id_ext[1] << 24);
-    final_msg->final.distance0 = (float)distance;
-
-    tx_msg.psduLen = sizeof(final_msg_xexun_t);
-    tx_msg.Flag = DWT_START_TX_IMMEDIATE;
-    poll_rx_ts = get_rx_timestamp_u64();
-
-    /* Compute final message transmission time. See NOTE 7 below. */
-    resp_tx_time = (uint64_t)(poll_rx_ts + (1200 * UUS_TO_DWT_TIME)) >> 8;
-    //dwt_setdelayedtrxtime(resp_tx_time);
-    tx_msg.delayedTxTimeH_sy = 0;//resp_tx_time;
-    g_resp_count = 0;
-    
-    ret = tx_start(&tx_msg);
-    if(ret != _NO_ERR)
+    switch(g_resp_count)
     {
-        poll_rx_delay++;
+        case 1:
+            final_msg->final.anchor_id0 = anc_id;
+            final_msg->final.distance0 = (float)distance;
+            break;
+        case 2:
+            final_msg->final.anchor_id1 = anc_id;
+            final_msg->final.distance1 = (float)distance;
+            break;
+        case 3:
+            final_msg->final.anchor_id2 = anc_id;
+            final_msg->final.distance2 = (float)distance;
+            break;
+        case 4:
+            final_msg->final.anchor_id3 = anc_id;
+            final_msg->final.distance3 = (float)distance;
+            Final_send();
+            break;
     }
+
     printf("Anc_ID: %08X, Distance : %f\r\n",anc_id, distance);
     //printf("%s|%d, Twr_Fcode_Tag_Final_Xexun\n", __FUNCTION__, __LINE__);    
 
@@ -392,7 +440,7 @@ void init_func(void)
             dwt_setdblrxbuffmode (0);    /**< dblBuf is not used in TWR */
             dwt_setrxaftertxdelay(0);    /**< no any delays set by default : part of config of receiver on Tx sending */
             dwt_setrxtimeout     (0);    /**< no any delays set by default : part of config of receiver on Tx sending */
-            //dwt_enableframefilter(p->frameFilter);
+            dwt_enableframefilter(DWT_FF_ACK_EN|DWT_FF_DATA_EN);
 
             dwt_setpanid(g_pan_id);
 
@@ -445,19 +493,28 @@ int ss_init_run(void)
 void rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
     uint32 frame_len;
+    
+    if(g_role == TAG_MODE && g_resp_count++ < 3)
+    {
+        dwt_setrxaftertxdelay(0); //no delay of turning on of RX
+        tx_msg.delayedRxTimeout_sy = 30000*(4-g_resp_count);
+        dwt_setrxtimeout(tx_msg.delayedRxTimeout_sy);        
+        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    }
+    
 
     //printf("%s|%d\n", __FUNCTION__, __LINE__);    
     /* A frame has been received, read it into the local buffer. */
     frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_MASK;
     if (frame_len <= RX_BUF_LEN)
     {
-      dwt_readrxdata(&rx_msg.msg, frame_len, 0);
-      rx_msg.psduLen = frame_len;
+        dwt_readrxdata(&rx_msg.msg, frame_len, 0);
+        rx_msg.psduLen = frame_len;
         //printf("Recv: Len: %d, RAW: %s\n", frame_len, Bytetohex((char *) &rx_msg.msg,frame_len));
     }
     else
     {
-        //printf("%s|%d, Recv: Len: %d\n", __FUNCTION__, __LINE__, frame_len);    
+        printf("%s|%d, Recv: Len: %d, return\n", __FUNCTION__, __LINE__, frame_len);    
         return;
     }
 
@@ -465,7 +522,7 @@ void rx_ok_cb(const dwt_cb_data_t *cb_data)
     {
         uint8 fCode = rx_msg.msg.twrMsg.messageData[0];
         uint8 rNum = rx_msg.msg.twrMsg.messageData[1];
-        
+
         switch(fCode)
         {
             case Twr_Fcode_Tag_Poll_Xexun:// Initiator (Tag) poll message Xexun
@@ -496,8 +553,8 @@ void rx_ok_cb(const dwt_cb_data_t *cb_data)
             case Twr_Fcode_Tag_Final_Xexun:// Initiator (Tag) final message back to Responder Xexun
                 {
                     final_msg_xexun_t *final_msg = &rx_msg.msg.finalXexunMsg;
-                    printf("TagID: %08X, rNum: %d, Anc %08X, Dis: %f\n", final_msg->mac.sourceAddr[0] | final_msg->mac.sourceAddr[1] << 8 | final_msg->final.id_ext[0] << 16 | final_msg->final.id_ext[1] << 24,
-                        final_msg->final.rNum, final_msg->final.anchor_id0, final_msg->final.distance0);
+                    //printf("TagID: %08X, rNum: %d, Anc %08X, Dis: %f\n", final_msg->mac.sourceAddr[0] | final_msg->mac.sourceAddr[1] << 8 | final_msg->final.id_ext[0] << 16 | final_msg->final.id_ext[1] << 24,
+                        //final_msg->final.rNum, final_msg->final.anchor_id0, final_msg->final.distance0);
 
                 }
                 break;
@@ -528,7 +585,12 @@ void rx_to_cb(const dwt_cb_data_t *cb_data)
   to_int_flag = 1 ;
   /* TESTING BREAKPOINT LOCATION #2 */
         //dwt_rxenable(DWT_START_RX_IMMEDIATE);
-    printf("%s|%d\n", __FUNCTION__, __LINE__);    
+    printf("%s|%d\n", __FUNCTION__, __LINE__); 
+
+    if(g_role == TAG_MODE && g_resp_count)
+    {
+        Final_send();
+    }
 }
 
 /*! ------------------------------------------------------------------------------------------------------------------
@@ -547,6 +609,14 @@ void rx_err_cb(const dwt_cb_data_t *cb_data)
     if(g_role == ANC_MODE)
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
+    if(g_role == TAG_MODE && g_resp_count++ < 3)
+    {
+        dwt_setrxaftertxdelay(0); //no delay of turning on of RX
+        tx_msg.delayedRxTimeout_sy = 30000*(4-g_resp_count);
+        dwt_setrxtimeout(tx_msg.delayedRxTimeout_sy);        
+        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    }
+    
     printf("%s|%d, Status %08X, Length %d\n", __FUNCTION__, __LINE__, cb_data->status, cb_data->datalength);    
 }
 
@@ -572,6 +642,8 @@ void tx_conf_cb(const dwt_cb_data_t *cb_data)
 
     if(g_role == ANC_MODE)
         dwt_rxenable(DWT_START_RX_IMMEDIATE);
+
+    g_poll_tx_ts = dwt_readtxtimestamplo32();
 
     //printf("%s|%d, Status %08X, Length %d\n", __FUNCTION__, __LINE__, cb_data->status, cb_data->datalength);    
 }
