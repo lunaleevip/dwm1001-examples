@@ -35,36 +35,8 @@
 #include "deca_regs.h"
 #include "deca_device_api.h"
 #include "uart.h"
-#include "ss_init_main.h"
+#include "ss_tag_main.h"
 #include "nrf_drv_gpiote.h"
-	
-//-----------------dw1000----------------------------
-
-/*DW1000 config function*/
-static dwt_config_t config = {
-    5,                /* Channel number. */
-    DWT_PRF_64M,      /* Pulse repetition frequency. */
-    DWT_PLEN_128,     /* Preamble length. Used in TX only. */
-    DWT_PAC8,         /* Preamble acquisition chunk size. Used in RX only. */
-    9,               /* TX preamble code. Used in TX only. */
-    9,               /* RX preamble code. Used in RX only. */
-    0,                /* 0 to use standard SFD, 1 to use non-standard SFD. */
-    DWT_BR_6M8,       /* Data rate. */
-    DWT_PHRMODE_STD,  /* PHY header mode. */
-    (129 + 8 - 8)     /* SFD timeout (preamble length + 1 + SFD length - PAC size). Used in RX only. */
-};
-
-/* Preamble timeout, in multiple of PAC size. See NOTE 3 below. */
-#define PRE_TIMEOUT 1000
-
-/* Delay between frames, in UWB microseconds. See NOTE 1 below. */
-#define POLL_TX_TO_RESP_RX_DLY_UUS 100 
-
-/*Should be accurately calculated during calibration*/
-#define TX_ANT_DLY 16454
-#define RX_ANT_DLY 16454	
-
-//--------------dw1000---end---------------
 
 
 #define TASK_DELAY        200           /**< Task delay. Delays a LED0 task for 200 ms */
@@ -246,7 +218,7 @@ void vInterruptInit (void)
  *    device should have its own antenna delay properly calibrated to get good precision when performing range measurements.
  * 3. This timeout is for complete reception of a frame, i.e. timeout duration must take into account the length of the expected frame. Here the value
  *    is arbitrary but chosen large enough to make sure that there is enough time to receive the complete response frame sent by the responder at the
- *    6.8M data rate used (around 200 µs).
+ *    6.8M data rate used (around 200 μs).
  * 4. In a real application, for optimum performance within regulatory limits, it may be necessary to set TX pulse bandwidth and TX power, (using
  *    the dwt_configuretxrf API call) to per device calibrated values saved in the target system or the DW1000 OTP memory.
  * 5. The user is referred to DecaRanging ARM application (distributed with EVK1000 product) for additional practical example of usage, and to the
