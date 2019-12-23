@@ -29,7 +29,7 @@
 #include "ss_tag_main.h"
 
 #define APP_NAME "SS TWR INIT v1.3"
-
+//#define NEW_MODE
 /* Inter-ranging delay period, in milliseconds. */
 #define RNG_DELAY_MS 1000
 
@@ -366,7 +366,9 @@ void Resp_Recved(resp_xexun_msg_t *resp_msg)
 */
 int ss_init_run(void)
 {
-
+#ifdef NEW_MODE
+    Tag_poll();
+#else
   /* Loop forever initiating ranging exchanges. */
 
 
@@ -461,6 +463,7 @@ int ss_init_run(void)
     /* Execute a delay between ranging exchanges. */
     //     deca_sleep(RNG_DELAY_MS);
     //	return(1);
+#endif
 }
 
 /*! ------------------------------------------------------------------------------------------------------------------
@@ -474,8 +477,76 @@ int ss_init_run(void)
 */
 void rx_ok_cb(const dwt_cb_data_t *cb_data)
 {
+#ifdef NEW_MODE
+    uint32 frame_len;
+    
+    if(g_resp_count++ < 3)
+    {
+        dwt_setrxaftertxdelay(0); //no delay of turning on of RX
+        tx_msg.delayedRxTimeout_sy = 2000*(4-g_resp_count);
+        dwt_setrxtimeout(tx_msg.delayedRxTimeout_sy);        
+        dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    }
+    
+
+    //printf("%s|%d\n", __FUNCTION__, __LINE__);    
+    /* A frame has been received, read it into the local buffer. */
+    frame_len = dwt_read32bitreg(RX_FINFO_ID) & RX_FINFO_RXFLEN_MASK;
+    if (frame_len <= RX_BUF_LEN)
+    {
+        dwt_readrxdata(&rx_msg.msg, frame_len, 0);
+        rx_msg.psduLen = frame_len;
+        //printf("Recv: Len: %d, RAW: %s\n", frame_len, Bytetohex((char *) &rx_msg.msg,frame_len));
+    }
+    else
+    {
+        printf("%s|%d, Recv: Len: %d, return\n", __FUNCTION__, __LINE__, frame_len);    
+        return;
+    }
+
+    if(rx_msg.msg.twrMsg.mac.frameCtrl[0] == Head_Msg_STD && rx_msg.msg.twrMsg.mac.frameCtrl[1] == Frame_Ctrl_SS)
+    {
+        uint8 fCode = rx_msg.msg.twrMsg.messageData[0];
+        uint8 rNum = rx_msg.msg.twrMsg.messageData[1];
+
+        switch(fCode)
+        {
+            case Twr_Fcode_Tag_Poll_Xexun:// Initiator (Tag) poll message Xexun
+            case Twr_Fcode_Anc_Poll_Xexun:// Initiator (Anchor) poll message Xexun
+                break;
+            case Twr_Fcode_Resp_Xexun:// Responder (Anchor) response to poll Xexun
+                {
+                    resp_xexun_msg_t *resp_msg = &rx_msg.msg.respXexunMsg;
+                    if(resp_msg->resp.rNum == g_rNum)
+                    {
+                        Resp_Recved(resp_msg);
+                    }
+                    else
+                    {
+                        printf("g_rNum: %d, rNum: %d\n", g_rNum, resp_msg->resp.rNum);
+                    }
+                }
+                break;
+            case Twr_Fcode_Resp2_Xexun:// Responder (Anchor to Anchor) response to poll Xexun
+                break;
+            case Twr_Fcode_Tag_Final_Xexun:// Initiator (Tag) final message back to Responder Xexun
+                {
+                    final_msg_xexun_t *final_msg = &rx_msg.msg.finalXexunMsg;
+                    //printf("TagID: %08X, rNum: %d, Anc %08X, Dis: %f\n", final_msg->mac.sourceAddr[0] | final_msg->mac.sourceAddr[1] << 8 | final_msg->final.id_ext[0] << 16 | final_msg->final.id_ext[1] << 24,
+                        //final_msg->final.rNum, final_msg->final.anchor_id0, final_msg->final.distance0);
+
+                }
+                break;
+            default:
+                break;
+        }
+        
+        //printf("ID %08X, Recv sourceAddr = %02X%02X, destAddr = %02X%02X, fCode %02X, rNum: %3d\r\n", dwt_getpartid(), rx_msg.msg.twrMsg.mac.sourceAddr[1], rx_msg.msg.twrMsg.mac.sourceAddr[0], rx_msg.msg.twrMsg.mac.destAddr[1], rx_msg.msg.twrMsg.mac.destAddr[0], fCode, rNum);
+        //printf("Recv: Len: %d, RAW: %s\n", frame_len, Bytetohex((char *) &rx_msg.msg,frame_len));
+    }
+#else
   rx_int_flag = 1 ;
-  /* TESTING BREAKPOINT LOCATION #1 */
+#endif
 }
 
 /*! ------------------------------------------------------------------------------------------------------------------
@@ -489,8 +560,15 @@ void rx_ok_cb(const dwt_cb_data_t *cb_data)
 */
 void rx_to_cb(const dwt_cb_data_t *cb_data)
 {
+#ifdef NEW_MODE
+    if(g_resp_count)
+    {
+        Final_send();
+    }
+#else
   to_int_flag = 1 ;
   /* TESTING BREAKPOINT LOCATION #2 */
+#endif
   printf("TimeOut\r\n");
 }
 
@@ -526,8 +604,11 @@ void tx_conf_cb(const dwt_cb_data_t *cb_data)
   * by DW1000 using DWT_RESPONSE_EXPECTED parameter when calling dwt_starttx().
   * An actual application that would not need this callback could simply not define it and set the corresponding field to NULL when calling
   * dwt_setcallbacks(). The ISR will not call it which will allow to save some interrupt processing time. */
-
+#ifdef NEW_MODE
+    g_poll_tx_ts = dwt_readtxtimestamplo32();
+#else
   tx_int_flag = 1 ;
+#endif
   /* TESTING BREAKPOINT LOCATION #4 */
 }
 
